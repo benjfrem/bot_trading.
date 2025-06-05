@@ -1,6 +1,6 @@
 """Module pour la détection des opportunités de trading (simplifié)"""
 import time
-from typing import Dict, Optional, List, Tuple, Any
+from typing import Dict, List, Tuple, Any
 from datetime import datetime
 from collections import deque
 
@@ -12,22 +12,22 @@ from logger import trading_logger, error_logger
 from utils.indicators.taapi_client import taapi_client
 
 class OpportunityFinder:
-    """Classe pour la détection des opportunités de trading (basée uniquement sur RSI)"""
-    
+    """Classe pour la détection des opportunités de trading"""
     def __init__(self, log_callback=None):
-        """Initialise le détecteur d'opportunités"""
         self._log_callback = log_callback
-        
+
     def _log(self, message: str, level: str = "info") -> None:
-        """Centralise la gestion des logs"""
         if self._log_callback:
             self._log_callback(message, level)
         else:
             if level == "info":
                 trading_logger.info(message)
-            elif level == "error":
+            else:
                 error_logger.error(message)
             print(message)
+
+    def _format_rsi(self, v): return f"{v:.2f}" if v is not None else "N/A"
+
     
     def init_scoring_system(self, rsi_analyzer):
         """Méthode maintenue pour compatibilité mais qui n'initialise plus de scoring system"""
@@ -183,6 +183,12 @@ class OpportunityFinder:
                 obv_ok = obv_val is not None and obv_val > obv_sma
                 trailing_levels = Config.TRAILING_STOP_LEVELS if obv_ok else Config.ADAPTIVE_TRAILING_STOP_LEVELS
                 self._log(f"OBV {'>' if obv_ok else '<='} SMA4 -> stop_levels = {'standard' if obv_ok else 'adaptive'}", "info")
+
+                # Calcul du score (Williams %R validée + OBV)
+                score = 1
+                if obv_ok:
+                    score += 1
+                self._log(f"Score calculé: {score}", "info")
                 
                 # Création de l'opportunité
                 opp = {
@@ -195,7 +201,8 @@ class OpportunityFinder:
                     'market_info': market_infos.get(symbol, {}),
                     'timestamp': datetime.now(),
                     'trailing_buy_triggered': True,
-                    'trailing_stop_levels': trailing_levels
+                    'trailing_stop_levels': trailing_levels,
+                    'score': score
                 }
                 results.append(opp)
                 
