@@ -2,6 +2,7 @@
 import time
 from typing import Dict, Optional, List, Tuple, Any
 from datetime import datetime
+from collections import deque
 
 from config import Config
 from .market_data import MarketData
@@ -35,21 +36,16 @@ class OpportunityFinder:
     def _validate_opportunity(self, opportunity: Dict[str, Any]) -> bool:
         """Valide une opportunité de trading"""
         try:
-            # Vérification des champs requis
             required_fields = ['symbol', 'current_price', 'rsi', 'market_info']
             if not all(field in opportunity for field in required_fields):
                 self._log("❌ Champs manquants dans l'opportunité")
                 return False
             
-            # Validation des valeurs
             if opportunity['current_price'] <= 0:
                 self._log("❌ Prix actuel invalide")
                 return False
                 
-            # Vérification des informations de marché
             market_info = opportunity['market_info']
-            
-            # Si les informations de marché sont manquantes ou incomplètes, utiliser des valeurs par défaut
             if not market_info:
                 self._log("❌ Informations de marché manquantes, utilisation de valeurs par défaut")
                 opportunity['market_info'] = {
@@ -60,15 +56,12 @@ class OpportunityFinder:
                 }
                 return True
             
-            # Vérifier et compléter les champs manquants
             if not market_info.get('min_amount'):
                 self._log("❌ min_amount manquant, utilisation de valeur par défaut")
                 market_info['min_amount'] = 0.0001
-                
             if not market_info.get('precision'):
                 self._log("❌ precision manquante, utilisation de valeur par défaut")
                 market_info['precision'] = {'amount': 8, 'price': 8}
-            
             return True
             
         except Exception as e:
@@ -81,224 +74,140 @@ class OpportunityFinder:
             return "N/A"
         return f"{rsi_value:.2f}"
     
-    async def find_opportunities(self, symbols_to_analyze: List[str], market_data: Dict[str, MarketData], 
-                                indicators_results: Dict[str, Tuple], market_infos: Dict[str, Dict], active_positions: set = None) -> List[Dict[str, Any]]:
+    async def find_opportunities(
+        self,
+        symbols_to_analyze: List[str],
+        market_data: Dict[str, MarketData],
+        indicators_results: Dict[str, Tuple],
+        market_infos: Dict[str, Dict],
+        active_positions: set = None
+    ) -> List[Dict[str, Any]]:
         """Analyse le marché pour identifier les opportunités de trading basées uniquement sur le trailing buy RSI"""
-        start_time = time.time()
-        results = []
-        
         if active_positions is None:
             active_positions = set()
+        results = []
         
         for symbol in symbols_to_analyze:
             try:
-                # Exclure les symboles avec position ouverte
                 if symbol in active_positions:
-                    self._log(f"Symbole {symbol} ignoré car position déjà ouverte")
+                    self._log(f"Symbole {symbol} ignoré car position déjà ouverte", "info")
                     continue
                 
-                # Récupérer les données des indicateurs (tendance toujours neutre)
                 current_price, rsi, variation = indicators_results.get(symbol, (None, None, 0.0))
-                adx = None
-                if not current_price or not rsi:
-                    self._log(f"Données insuffisantes pour {symbol}: prix={current_price}, RSI={rsi}")
+                if current_price is None or rsi is None:
+                    self._log(f"Données insuffisantes pour {symbol}: prix={current_price}, RSI={rsi}", "error")
                     continue
                 
-                # Mise à jour du prix actuel dans les données de marché
-                symbol_market_data = market_data.get(symbol)
-                if not symbol_market_data:
-                    self._log(f"Données de marché non disponibles pour {symbol}")
+                md = market_data.get(symbol)
+                if not md:
+                    self._log(f"Données de marché non disponibles pour {symbol}", "error")
                     continue
                 
-                symbol_market_data.last_price = current_price
-                symbol_market_data.market_trend = "neutral"  # Toujours tendance neutre
-                symbol_market_data.trend_variation = variation
+                md.last_price = current_price
+                md.market_trend = "neutral"
+                md.trend_variation = variation
                 
-                # Calcul de la variation de prix
-                price_change = ((current_price - symbol_market_data.reference_price) / symbol_market_data.reference_price) * 100
+                price_change = ((current_price - md.reference_price) / md.reference_price) * 100
                 
-                # Récupérer le RSI
-                multi_period_rsi = getattr(symbol_market_data, 'multi_period_rsi', {})
-                rsi_14 = multi_period_rsi.get(14, rsi)  # Utiliser le RSI passé en paramètre si non disponible dans multi_period_rsi
-                
-                # Formater la valeur de RSI pour l'affichage
-                rsi_14_str = self._format_rsi_value(rsi_14)
-                
-                # Log des indicateurs clés pour chaque symbole analysé avec ATR
-                # Récupérer l'ATR brut pour logs
+                # Logs indicateurs de base
                 atr_price = get_atr(symbol)
                 atr_str = f"{atr_price:.8f}"
+                # Désactivation Fisher Transform (non utilisé)
+                #willr = await taapi_client.get_williams_r(symbol.replace('/USDC','/USDT'))
+                #williams_str = f"{willr:.2f}" if willr is not None else "N/A"
+                willr_val = await taapi_client.get_williams_r(symbol.replace('/USDC','/USDT'))
+                williams_str = f"{willr_val:.2f}" if willr_val is not None else "N/A"
                 
-                # Récupération des indicateurs Fisher et Williams pour logs (symbole USDT)
-                ta_symbol = symbol.replace('/USDC', '/USDT')
-                fisher_val = await taapi_client.get_fisher(ta_symbol)
-                williams_val = await taapi_client.get_williams_r(ta_symbol)
-                fisher_str = f"{fisher_val:.2f}" if fisher_val is not None else "N/A"
-                williams_str = f"{williams_val:.2f}" if williams_val is not None else "N/A"
+                if not hasattr(md, 'obv_history'):
+                    md.obv_history = deque(maxlen=4)
+                obv_val = await taapi_client.get_obv(symbol.replace('/USDC','/USDT'))
+                obv_str = f"{obv_val:.2f}" if obv_val is not None else "N/A"
+                md.obv_history.append(obv_val or 0.0)
+                obv_sma = sum(md.obv_history) / len(md.obv_history)
+                obv_sma_str = f"{obv_sma:.2f}"
                 
                 self._log(f"""
 === INDICATEURS {symbol} ===
    Prix actuel: {current_price:.8f}
-   RSI: {rsi_14_str}
+   RSI: {rsi:.2f}
    ATR: {atr_str}
-   WILLIAM : {williams_str}
-   F/T : {fisher_str}
-""")
+   Williams %R: {williams_str}
+   OBV: {obv_str} / OBV SMA4: {obv_sma_str}
+""", "info")
                 
-                # Initialiser le trailing buy RSI si ce n'est pas déjà fait
-                if not hasattr(symbol_market_data, 'trailing_buy_rsi') or symbol_market_data.trailing_buy_rsi is None:
-                    symbol_market_data.trailing_buy_rsi = TrailingBuyRsi()
-                    symbol_market_data.rsi_confirm_counter = 0
-                    symbol_market_data.rsi_last_confirm_value = None
-                    self._log(f"Trailing Buy RSI initialisé pour {symbol}")
+                # Trailing Buy RSI -> detection initiale RSI survente puis double tick
+                if not hasattr(md, 'trailing_buy_rsi') or md.trailing_buy_rsi is None:
+                    md.trailing_buy_rsi = TrailingBuyRsi()
+                    md.rsi_confirm_counter = 0
+                    md.rsi_last_value = None
+                    self._log(f"Trailing Buy RSI initialisé pour {symbol}", "info")
                 
-                # Double confirmation RSI: mise à jour du trailing buy RSI (état et logs)
-                symbol_market_data.trailing_buy_rsi.update(rsi, current_price, log_enabled=True)
-                # Récupérer le niveau applicable
-                level = symbol_market_data.trailing_buy_rsi.current_level
+                md.trailing_buy_rsi.update(rsi, current_price)
+                level = md.trailing_buy_rsi.current_level
                 if not level:
                     continue
                 threshold = level.buy_level
                 self._log(f"Confirmation RSI: seuil d'achat = {threshold:.2f} pour {symbol}", "info")
-                # Mise à jour du compteur de ticks avec vérification du changement de RSI
+                
+                # Double tick confirmation
                 if rsi >= threshold:
-                    # Premier tick
-                    if not hasattr(symbol_market_data, 'rsi_confirm_counter') or symbol_market_data.rsi_confirm_counter == 0:
-                        symbol_market_data.rsi_confirm_counter = 1
-                        symbol_market_data.rsi_last_confirm_value = rsi
-                        self._log(
-                            f"Tick 1/{Config.DOUBLE_CONFIRMATION_TICKS} de confirmation RSI pour {symbol} (RSI initial = {rsi:.2f})",
-                            "info"
-                        )
-                    else:
-                        # Tick suivant : incrémenter si le RSI a changé
-                        if rsi != symbol_market_data.rsi_last_confirm_value:
-                            symbol_market_data.rsi_confirm_counter += 1
-                            symbol_market_data.rsi_last_confirm_value = rsi
-                            self._log(
-                                f"Tick {symbol_market_data.rsi_confirm_counter}/{Config.DOUBLE_CONFIRMATION_TICKS} "
-                                f"de confirmation RSI pour {symbol} (RSI = {rsi:.2f}, différent de précédent)",
-                                "info"
-                            )
-                        else:
-                            self._log(
-                                f"Mise à jour RSI identique pour {symbol} (RSI = {rsi:.2f}); tick non comptabilisé",
-                                "info"
-                            )
+                    md.rsi_confirm_counter += 1
+                    self._log(f"Tick {md.rsi_confirm_counter}/{Config.DOUBLE_CONFIRMATION_TICKS} RSI >= {threshold:.2f}", "info")
                 else:
-                    # RSI repassé sous le seuil : réinitialisation complète
-                    if symbol_market_data.rsi_confirm_counter > 0:
-                        self._log(
-                            f"Réinitialisation du compteur RSI pour {symbol} (RSI = {rsi:.2f} < {threshold:.2f})",
-                            "info"
-                        )
-                    symbol_market_data.rsi_confirm_counter = 0
-                    # Réinitialiser (sans supprimer) l'attribut rsi_last_confirm_value
-                    symbol_market_data.rsi_last_confirm_value = None
-                # Vérifier si le nombre de ticks requis est atteint
-                if symbol_market_data.rsi_confirm_counter < Config.DOUBLE_CONFIRMATION_TICKS:
-                    continue
-                # Confirmation RSI obtenue, vérifier maintenant le filtre stochastique
-                self._log(
-                    f"Confirmation RSI validée "
-                    f"({Config.DOUBLE_CONFIRMATION_TICKS}/{Config.DOUBLE_CONFIRMATION_TICKS}) pour {symbol}",
-                    "info"
-                )
+                    if md.rsi_confirm_counter > 0:
+                        self._log(f"Réinitialisation ticks RSI pour {symbol} (RSI={rsi:.2f} < {threshold:.2f})", "info")
+                    md.rsi_confirm_counter = 0
                 
-                    
-                # Récupérer les valeurs stochastiques pour les ajouter à l'opportunité
-                buy_signal = current_price
-                # Verrouiller l'état du trailing buy RSI jusqu'au traitement de l'ordre
-                tb = symbol_market_data.trailing_buy_rsi
-                tb._lock_state_for_buy = True
-                tb._signal_emitted = True
-                # Réinitialiser le compteur
-                symbol_market_data.rsi_confirm_counter = 0
-
-                # Scoring des validateurs (ATR, Fisher, Williams)
-                score = 0
-                atr = get_atr(symbol)
-                atr_ok = atr <= Config.ATR_HIGH_VOLATILITY_THRESHOLD
-                ta_symbol = symbol.replace('/USDC', '/USDT')
-                fisher = await taapi_client.get_fisher(ta_symbol)
-                fisher_ok = (fisher is not None and -Config.FISHER_THRESHOLD <= fisher <= Config.FISHER_THRESHOLD)
-                williams = await taapi_client.get_williams_r(ta_symbol)
-                williams_ok = (williams is not None and Config.WILLIAMS_R_OVERSOLD_THRESHOLD < williams < Config.WILLIAMS_R_OVERBOUGHT_THRESHOLD)
-                score += atr_ok + fisher_ok + williams_ok
-                self._log(f"Score {score}/3 pour {symbol}: ATR OK={atr_ok}, Fisher OK={fisher_ok}, Williams OK={williams_ok}", "info")
-                if score < 2:
-                    self._log(f"Score insuffisant pour {symbol}, opportunité ignorée", "info")
+                if md.rsi_confirm_counter < Config.DOUBLE_CONFIRMATION_TICKS:
                     continue
-
-
-                # Récupérer les infos du marché
+                self._log(f"RSI confirmé pour {symbol}", "info")
+                md.rsi_confirm_counter = 0
+                md.trailing_buy_rsi._lock_state_for_buy = True
+                md.trailing_buy_rsi._signal_emitted = True
                 
-                # Récupérer les infos du marché
-                market_info = market_infos.get(symbol)
-                if not market_info:
+                # Conditions supplémentaires
+                # Williams %R strict entre -80 et -40
+                if willr_val is None or not(-80 < willr_val < -40):
+                    self._log(f"Williams %R hors plage: {williams_str}", "info")
                     continue
                 
-                # Création de l'opportunité basée uniquement sur le signal trailing buy
-                opportunity = {
+                # DMI négatif
+                dmi = await taapi_client.get_dmi(symbol.replace('/USDC','/USDT'), period=Config.ADX_LENGTH_VALID, interval=Config.ADX_INTERVAL_VALID)
+                mdi = dmi['mdi'] if dmi else None
+                mdi_str = f"{mdi:.2f}" if mdi is not None else "N/A"
+                if mdi is not None and mdi > Config.DMI_NEGATIVE_THRESHOLD:
+                    self._log(f"DMI- trop élevé: {mdi_str}", "info")
+                    continue
+                
+                # OBV vs SMA : choix des trailing stop levels
+                obv_ok = obv_val is not None and obv_val > obv_sma
+                trailing_levels = Config.TRAILING_STOP_LEVELS if obv_ok else Config.ADAPTIVE_TRAILING_STOP_LEVELS
+                self._log(f"OBV {'>' if obv_ok else '<='} SMA4 -> stop_levels = {'standard' if obv_ok else 'adaptive'}", "info")
+                
+                # Création de l'opportunité
+                opp = {
                     'symbol': symbol,
                     'current_price': current_price,
-                    'buy_price': buy_signal,  # Utiliser le prix retourné par le trailing buy
-                    'reference_price': symbol_market_data.reference_price,
+                    'buy_price': current_price,
+                    'reference_price': md.reference_price,
                     'price_change': price_change,
                     'rsi': rsi,
-                    'market_info': market_info,
+                    'market_info': market_infos.get(symbol, {}),
                     'timestamp': datetime.now(),
-                    'score': score,  # Score calculé
-'trailing_stop_levels': Config.TRAILING_STOP_LEVELS if score == 3 else Config.ADAPTIVE_TRAILING_STOP_LEVELS,
-                    'position_size': 1.0,  # Toujours position complète
-                    'trailing_buy_triggered': True,  # Signal trailing buy confirmé
-                    'market_trend': "neutral",  # Toujours tendance neutre
-                    'trend_variation': variation,
-                    'lowest_rsi': symbol_market_data.trailing_buy_rsi.lowest_rsi,  # Ajout du RSI minimum pour référence
-                                                        }
+                    'trailing_buy_triggered': True,
+                    'trailing_stop_levels': trailing_levels
+                }
+                results.append(opp)
                 
-                # Validation finale de l'opportunité
-                if not self._validate_opportunity(opportunity):
-                    continue
-                
-                # Journaliser les informations de l'opportunité
                 self._log(f"""
 === SIGNAL D'ACHAT DÉTECTÉ ===
    Symbole: {symbol}
-   RSI actuel: {rsi_14_str}
-   Prix actuel: {current_price:.8f}
-   Prix signal: {buy_signal:.8f}
-""")
-                
-                results.append(opportunity)
+   RSI actuel: {rsi:.2f}
+   Prix signal: {current_price:.8f}
+""", "info")
                 
             except Exception as e:
-                self._log(f"Erreur d'analyse pour {symbol}: {str(e)}", "error")
+                self._log(f"Erreur d'analyse pour {symbol}: {e}", "error")
                 continue
         
-        # Filtrer les résultats valides
-        opportunities = [r for r in results if r is not None]
-        # Afficher les détails des opportunités retenues (avec moins de détails)
-        if opportunities:
-            self._log("\n=== OPPORTUNITÉS DÉTECTÉES ===")
-            for opp in opportunities:
-                symbol = opp['symbol']
-                # Recalcul de l'ATR pour chaque opportunité affichée
-                atr_price_loop = get_atr(symbol)
-                atr_str_loop = f"{atr_price_loop:.8f}"
-                # Récupération des indicateurs Fisher et Williams pour résumé (symbole USDT)
-                ta_symbol = symbol.replace('/USDC', '/USDT')
-                fisher_loop = await taapi_client.get_fisher(ta_symbol)
-                williams_loop = await taapi_client.get_williams_r(ta_symbol)
-                fisher_str_loop = f"{fisher_loop:.2f}" if fisher_loop is not None else "N/A"
-                williams_str_loop = f"{williams_loop:.2f}" if williams_loop is not None else "N/A"
-                self._log(f"""
-=== INDICATEURS {symbol} ===
-   Prix actuel: {opp['current_price']:.8f}
-   RSI: {opp['rsi']:.2f}
-   ATR: {atr_str_loop}
-   WILLIAM : {williams_str_loop}
-   F/T     : {fisher_str_loop}
-""")
-
-        return opportunities
+        return results
