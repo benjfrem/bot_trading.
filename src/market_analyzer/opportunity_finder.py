@@ -169,6 +169,7 @@ class OpportunityFinder:
                 # Williams %R strict entre -80 et -40
                 if willr_val is None or not(-80 < willr_val < -40):
                     self._log(f"Williams %R hors plage: {williams_str}", "info")
+                    md.trailing_buy_rsi.lowest_rsi = rsi
                     continue
                 
                 # DMI négatif
@@ -177,6 +178,7 @@ class OpportunityFinder:
                 mdi_str = f"{mdi:.2f}" if mdi is not None else "N/A"
                 if mdi is not None and mdi > Config.DMI_NEGATIVE_THRESHOLD:
                     self._log(f"DMI- trop élevé: {mdi_str}", "info")
+                    md.trailing_buy_rsi.lowest_rsi = rsi
                     continue
                 
                 # OBV vs SMA : choix des trailing stop levels
@@ -189,6 +191,16 @@ class OpportunityFinder:
                 if obv_ok:
                     score += 1
                 self._log(f"Score calculé: {score}", "info")
+
+                self._log("─────────────────────────────", "info")
+                self._log(f"=== VERIFICATION DES INDICATEURS POUR {symbol} ===", "info")
+                self._log("─────────────────────────────", "info")
+                self._log(f"RSI actuel: {self._format_rsi(rsi)} | Seuil: {threshold:.2f} | Ticks: {md.rsi_confirm_counter}/{Config.DOUBLE_CONFIRMATION_TICKS} → {'OK' if md.rsi_confirm_counter>=Config.DOUBLE_CONFIRMATION_TICKS else 'EN ATTENTE'}", "info")
+                self._log(f"Williams %R: {self._format_rsi(willr_val)} | Condition requise [-80;-40] → {'OK' if willr_val is not None and -80 < willr_val < -40 else 'HORS PLAGE'}", "info")
+                self._log(f"DMI (mdi): {self._format_rsi(mdi)} | Seuil: {Config.DMI_NEGATIVE_THRESHOLD} → {'OK' if mdi is not None and mdi <= Config.DMI_NEGATIVE_THRESHOLD else 'TROP ÉLEVÉ'}", "info")
+                self._log(f"OBV: {self._format_rsi(obv_val)} / SMA: {self._format_rsi(obv_sma)} → {'standard' if obv_ok else 'adaptive'} stop_levels", "info")
+                self._log(f"=== FIN DE LA VERIFICATION POUR {symbol} ===", "info")
+                self._log("─────────────────────────────", "info")
                 
                 # Création de l'opportunité
                 opp = {
@@ -202,7 +214,8 @@ class OpportunityFinder:
                     'timestamp': datetime.now(),
                     'trailing_buy_triggered': True,
                     'trailing_stop_levels': trailing_levels,
-                    'score': score
+                    'score': score,
+                    'position_size': 1.0
                 }
                 results.append(opp)
                 
