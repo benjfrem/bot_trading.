@@ -137,7 +137,7 @@ class PositionManager:
             async def on_timeout():
                 self.pending_orders.pop(symbol, None)
                 await self._handle_order_timeout(symbol, price, position_size)
-            async def on_fill(order_info):
+            def on_fill(order_info):
                 self._process_successful_buy_order(symbol, order_info)
 
             # Envoi de l'ordre limite
@@ -165,6 +165,9 @@ class PositionManager:
                 return False
 
             log_event(f"⏳ Ordre créé: {order.get('id')} en attente")
+            # Instancier le StopLossManager dès l'ouverture de la position
+            self.portfolio_manager.trailing_stops[symbol] = StopLossManager(entry_price=price, symbol=symbol)
+
             return True
 
     async def can_open_position(self, symbol: str = None) -> bool:
@@ -186,7 +189,7 @@ class PositionManager:
 
             # 3. Vérifier balance disponible
             balance = await self.portfolio_manager.exchange_ops.get_balance()
-            if not balance or balance < Config.TRANSACTION_AMOUNT:
+            if not balance or balance < Config.TRANSACTION_QUANTITY:
                 log_event(f"❌ Balance insuffisante: {balance}", "error")
                 return False
 
@@ -195,35 +198,53 @@ class PositionManager:
             log_event(f"❌ Erreur can_open_position: {str(e)}", "error")
             return False
 
-    def _process_successful_buy_order(self, symbol: str, order: dict) -> bool:
-        """Met à jour la position après ordre acheté"""
-        price_avg = float(order.get('average') or 0)
-        qty_filled = float(order.get('filled') or order.get('amount') or 0)
-        if price_avg <= 0 or qty_filled <= 0:
-            log_event("❌ Données ordre invalides", "error")
-            return False
-        total_cost = price_avg * qty_filled
+        def _process_successful_buy_order(self, symbol: str, order: dict) -> bool:
+            """Met à jour la position après ordre acheté"""
+            price_avg = float(order.get('average') or 0)
+            qty_filled = float(order.get('filled') or order.get('amount') or 0)
+            if price_avg <= 0 or qty_filled <= 0:
+                log_event("❌ Données ordre invalides", "error")
+                return False
+            total_cost = price_avg * qty_filled
 
-        # Récupérer trailing levels selon le score
-        latest_opps = getattr(self.portfolio_manager.market_analyzer, 'latest_opportunities', [])
-        opportunity = next((opp for opp in latest_opps if opp.get('symbol') == symbol), None)
-        trailing_levels = opportunity.get('trailing_stop_levels', Config.TRAILING_STOP_LEVELS) if opportunity else Config.TRAILING_STOP_LEVELS
-        
-        pos = Position(
-            symbol=symbol,
-            entry_price=price_avg,
-            quantity=qty_filled,
-            timestamp=datetime.now(),
-            order_id=order.get('id',''),
-            total_cost=total_cost
-        )
+            # Déterminer le prix d'entrée de référence (dernier prix marché)
+            md = self.portfolio_manager.market_analyzer.market_data.get(symbol)
+            entry_price_ref = md.last_price if md and hasattr(md, 'last_price') else price_avg
+
+            # Récupérer trailing levels selon le score
+            latest_opps = getattr(self.portfolio_manager.market_analyzer, 'latest_opportunities', [])
+            opportunity = next((opp for opp in latest_opps if opp.get('symbol') == symbol), {})
+            trailing_levels = opportunity.get('trailing_stop_levels', Config.TRAILING_STOP_LEVELS)
+            
+            pos = Position(
+                symbol=symbol,
+                entry_price=entry_price_ref,
+                quantity=qty_filled,
+                timestamp=datetime.now(),
+                order_id=order.get('id',''),
+                total_cost=total_cost
+            )
         self.portfolio_manager.positions[symbol] = pos
         
         # Création du stop loss adaptatif
-        self.portfolio_manager.trailing_stops[symbol] = StopLossManager(entry_price=price_avg, symbol=symbol)
+        # Détermination du multiplicateur SL selon ADX et DI
+        adx = opportunity.get('adx', 0) or 0
+        plus_di = opportunity.get('plus_di', 0) or 0
+        minus_di = opportunity.get('minus_di', 0) or 0
+        if adx >= 25:
+            multiplier = 2.2 if plus_di > minus_di else 1.2
+        else:
+            multiplier = 1.6
+        log_event(f"SL adaptatif choisi : ATR×{multiplier:.2f} (ADX={adx:.2f}, +DI={plus_di:.2f}, -DI={minus_di:.2f})", "info")
+        # Création du stop loss adaptatif avec multiplicateur dynamique
+        self.portfolio_manager.trailing_stops[symbol] = StopLossManager(
+            entry_price=entry_price_ref,
+            symbol=symbol,
+            multiplier=multiplier
+        )
         # Configuration du trailing stop selon le score
         self.portfolio_manager.trailing_stop_paliers[symbol] = TrailingStopLoss(
-            entry_price=price_avg,
+            entry_price=entry_price_ref,
             levels=trailing_levels
         )
         
